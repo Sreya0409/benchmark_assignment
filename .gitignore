@@ -1,0 +1,12 @@
+.env
+__pycache__/
+data/pokec_sample.csv
+data/soc-pokec-relationships.txt.gz
+data/nodes.csv
+data/edges.csv
+results/*.json
+results/charts/
+!results/.gitkeep
+.git/
+.DS_Store
+./data/

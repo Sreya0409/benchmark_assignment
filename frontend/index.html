@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Graph DB Benchmark Results</title>
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <header class="hero">
+      <nav class="topline">
+        <div class="brand-mark">GB</div>
+        <div>
+          <p class="eyebrow">Graph DB Benchmark</p>
+          <h1>Managed Graph Database Results</h1>
+        </div>
+        <div class="run-meta" id="run-meta">Loading results...</div>
+      </nav>
+      <div class="hero-summary">
+        <p>
+          Operational benchmark dashboard for traversal latency, lookup latency,
+          ingest throughput, and mixed read/write throughput.
+        </p>
+      </div>
+    </header>
+
+    <main>
+      <section class="kpi-grid" id="kpi-grid"></section>
+      <section class="status-strip" id="status-strip"></section>
+
+      <section class="chart-grid">
+        <figure class="panel chart-panel featured-chart">
+          <div class="panel-heading">
+            <div>
+              <p class="section-kicker">Latency</p>
+              <h2>Traversal Depth</h2>
+            </div>
+          </div>
+          <img src="../results/charts/traversal_latency.png" alt="Traversal latency chart">
+          <figcaption>p50 and p95 traversal latency by hop depth.</figcaption>
+        </figure>
+        <figure class="panel chart-panel">
+          <div class="panel-heading">
+            <div>
+              <p class="section-kicker">Loading</p>
+              <h2>Ingest Rate</h2>
+            </div>
+          </div>
+          <img src="../results/charts/ingest_throughput.png" alt="Ingest throughput chart">
+          <figcaption>Node and relationship insert throughput.</figcaption>
+        </figure>
+        <figure class="panel chart-panel">
+          <div class="panel-heading">
+            <div>
+              <p class="section-kicker">Concurrency</p>
+              <h2>Mixed Workload</h2>
+            </div>
+          </div>
+          <img src="../results/charts/mixed_workload_qps.png" alt="Mixed workload QPS chart">
+          <figcaption>Read/write operations per second.</figcaption>
+        </figure>
+      </section>
+
+      <section class="panel">
+        <div class="panel-heading">
+          <div>
+            <p class="section-kicker">Read workload</p>
+            <h2>Traversal Latency</h2>
+          </div>
+        </div>
+        <div class="table-wrap" id="traversal-table"></div>
+      </section>
+
+      <section class="two-column">
+        <div class="panel">
+          <div class="panel-heading">
+            <div>
+              <p class="section-kicker">Read workload</p>
+              <h2>Lookup Latency</h2>
+            </div>
+          </div>
+          <div class="table-wrap" id="lookup-table"></div>
+        </div>
+        <div class="panel">
+          <div class="panel-heading">
+            <div>
+              <p class="section-kicker">Read workload</p>
+              <h2>Aggregation Latency</h2>
+            </div>
+          </div>
+          <div class="table-wrap" id="aggregation-table"></div>
+        </div>
+      </section>
+
+      <section class="two-column">
+        <div class="panel">
+          <div class="panel-heading">
+            <div>
+              <p class="section-kicker">Write workload</p>
+              <h2>Ingest Throughput</h2>
+            </div>
+          </div>
+          <div class="table-wrap" id="ingest-table"></div>
+        </div>
+        <div class="panel">
+          <div class="panel-heading">
+            <div>
+              <p class="section-kicker">Concurrent workload</p>
+              <h2>Mixed Read/Write Throughput</h2>
+            </div>
+          </div>
+          <div class="table-wrap" id="mixed-table"></div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-heading">
+          <div>
+            <p class="section-kicker">Run notes</p>
+            <h2>Failures And Caveats</h2>
+          </div>
+        </div>
+        <div id="failures"></div>
+      </section>
+    </main>
+
+    <script src="app.js"></script>
+  </body>
+</html>
