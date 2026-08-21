@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 from typing import Any
 
@@ -93,17 +94,22 @@ def make_ingest_chart(results: dict[str, Any], output_path: Path) -> None:
     labels: list[str] = []
     node_rates: list[float] = []
     rel_rates: list[float] = []
+    unavailable_positions: list[int] = []
 
     for platform, data in platforms.items():
         ingest = data.get("ingest", {})
         nodes_per_second = nested_get(ingest, "nodes", "nodes_per_second")
         rels_per_second = nested_get(ingest, "edges", "rels_per_second")
-        if nodes_per_second is None and rels_per_second is None:
-            continue
-
         labels.append(platform)
-        node_rates.append(nodes_per_second or 0)
-        rel_rates.append(rels_per_second or 0)
+        if nodes_per_second is None and rels_per_second is None:
+            # Keep the platform visible without treating an unavailable
+            # measurement as a zero-throughput result.
+            node_rates.append(math.nan)
+            rel_rates.append(math.nan)
+            unavailable_positions.append(len(labels) - 1)
+        else:
+            node_rates.append(nodes_per_second)
+            rel_rates.append(rels_per_second)
 
     fig, ax = plt.subplots(figsize=(max(7, len(labels) * 1.2), 5))
     x_positions = list(range(len(labels)))
@@ -124,6 +130,17 @@ def make_ingest_chart(results: dict[str, Any], output_path: Path) -> None:
     ax.set_ylabel("Rows per second")
     ax.set_xticks(x_positions)
     ax.set_xticklabels(labels)
+    for position in unavailable_positions:
+        ax.text(
+            position,
+            0.02,
+            "Unavailable",
+            ha="center",
+            va="bottom",
+            transform=ax.get_xaxis_transform(),
+            fontsize=9,
+            fontstyle="italic",
+        )
     ax.legend()
     ax.grid(axis="y", alpha=0.25)
     save_figure(fig, output_path)

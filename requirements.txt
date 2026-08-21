@@ -8,4 +8,3 @@ tqdm==4.67.1
 requests==2.32.3
 FalkorDB==1.7.1
 certifi==2026.7.22
-typing_extensions

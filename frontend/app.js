@@ -209,34 +209,25 @@ const renderAggregation = (results, platforms) => {
 };
 
 const renderIngest = (results, platforms) => {
+  const formatIngest = (platform, path) => {
+    const value = get(results, ["platforms", platform, ...path]);
+    if (value !== null && value !== undefined) return formatNumber(value);
+    const ingest = get(results, ["platforms", platform, "ingest"]);
+    return ingest && ingest.skipped ? "Unavailable" : "-";
+  };
+
   const rows = [
     [
       "nodes per second",
-      ...platforms.map((platform) =>
-        formatNumber(
-          get(results, [
-            "platforms",
-            platform,
-            "ingest",
-            "nodes",
-            "nodes_per_second",
-          ]),
-        ),
-      ),
+      ...platforms.map((platform) => formatIngest(platform, ["ingest", "nodes", "nodes_per_second"])),
     ],
     [
       "relationships per second",
-      ...platforms.map((platform) =>
-        formatNumber(
-          get(results, [
-            "platforms",
-            platform,
-            "ingest",
-            "edges",
-            "rels_per_second",
-          ]),
-        ),
-      ),
+      ...platforms.map((platform) => formatIngest(platform, ["ingest", "edges", "rels_per_second"])),
+    ],
+    [
+      "total load wall-clock seconds",
+      ...platforms.map((platform) => formatIngest(platform, ["ingest", "total_wall_clock_seconds"])),
     ],
   ];
   renderTable("ingest-table", ["metric", ...platforms], rows);
@@ -262,6 +253,7 @@ const renderMixed = (results, platforms) => {
 
 const renderFailures = (results) => {
   const caveats = [
+    "CognoDB fresh-ingestion throughput is unavailable, not zero: a safe isolated reset could not be completed after a relationship-delete/commit inconsistency.",
     "TigerGraph setup uses schema-first GSQL rather than ad hoc Cypher/AQL inserts.",
     "Memgraph uses Bolt-compatible ingest, but its index DDL differs from Neo4j Aura.",
   ];

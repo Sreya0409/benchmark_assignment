@@ -7,6 +7,9 @@ data/edges.csv
 results/*.json
 results/charts/
 !results/.gitkeep
+!results/latest.json
+!results/charts/
+!results/charts/*.png
 .git/
 .DS_Store
 ./data/

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import argparse
 import csv
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -53,6 +55,7 @@ READ_ITERATIONS = 100
 WARMUP = 10
 MIXED_DURATION_SECONDS = 10
 CONCURRENCY_LEVELS = (1, 10, 40)
+MIXED_READ_WRITE_RATIO = 0.8
 
 
 class BenchCypherMixin:
@@ -381,6 +384,7 @@ def create_memgraph_indexes(loader: Any) -> None:
 
 def load_one_platform(platform: str, loader: Any, expected_nodes: int, expected_edges: int) -> dict[str, Any]:
     """Load one empty namespace, with a bounded Memgraph-only recovery path."""
+    started_at = time.perf_counter()
     if platform == "memgraph":
         run_memgraph_operation(loader, "index setup", lambda: create_memgraph_indexes(loader))
         node_ingest = run_memgraph_operation(
@@ -401,7 +405,82 @@ def load_one_platform(platform: str, loader: Any, expected_nodes: int, expected_
             f"count mismatch: expected {expected_nodes}/{expected_edges}, "
             f"got {loaded[0]}/{loaded[1]}"
         )
-    return {"nodes": node_ingest, "edges": edge_ingest}
+    return {
+        "nodes": node_ingest,
+        "edges": edge_ingest,
+        "total_wall_clock_seconds": time.perf_counter() - started_at,
+    }
+
+
+def clear_cognodb_isolated_namespace(loader: BenchCognoDBLoader, batch_size: int = 50) -> None:
+    """Clear only this run's labelled nodes and relationships for re-measurement."""
+    relationship_query = f"""
+    MATCH (source:{NODE_PATTERN})-[r:{REL_TYPE}]->(target:{NODE_PATTERN})
+    WITH r LIMIT $batch_size
+    DELETE r
+    RETURN count(r) AS deleted
+    """
+    node_query = f"""
+    MATCH (node:{NODE_PATTERN})
+    WITH node LIMIT $batch_size
+    DELETE node
+    RETURN count(node) AS deleted
+    """
+    def delete_batch(query: str) -> int:
+        for attempt in range(loader.MAX_DEFUNCT_RETRIES + 1):
+            previous_handler = signal.signal(signal.SIGALRM, loader._raise_timeout)
+            signal.setitimer(signal.ITIMER_REAL, loader.WRITE_TIMEOUT_SECONDS)
+            try:
+                with loader.driver.session(**loader._session_kwargs()) as session:
+                    return int(session.run(query, batch_size=batch_size).single()["deleted"])
+            except Exception:
+                if attempt == loader.MAX_DEFUNCT_RETRIES:
+                    raise
+                loader.close()
+                loader.connect()
+            finally:
+                signal.setitimer(signal.ITIMER_REAL, 0)
+                signal.signal(signal.SIGALRM, previous_handler)
+        raise AssertionError("unreachable")
+
+    for query, entity in ((relationship_query, "relationships"), (node_query, "nodes")):
+        deleted_total = 0
+        while True:
+            deleted = delete_batch(query)
+            if deleted == 0:
+                break
+            deleted_total += deleted
+            if deleted_total % 100 == 0:
+                print(f"CognoDB      isolated {entity} cleared: {deleted_total}", flush=True)
+        print(f"CognoDB      isolated {entity} cleared: {deleted_total}", flush=True)
+    if counts("cognodb", loader) != (0, 0):
+        raise RuntimeError("CognoDB isolated namespace did not clear cleanly")
+
+
+def clear_tigergraph_isolated_namespace(loader: BenchTigerGraphLoader) -> None:
+    """Clear only the known dense shared-dataset IDs and their benchmark edges."""
+    node_ids = [str(row["id"]) for row in csv_rows(NODES_CSV)]
+    edge_sources = sorted({str(row["source"]) for row in csv_rows(EDGES_CSV)})
+    for source_id in edge_sources:
+        loader.conn.delEdges(loader.VERTEX_TYPE, source_id, loader.EDGE_TYPE)
+    deleted = int(loader.conn.delVerticesById(loader.VERTEX_TYPE, node_ids))
+    if deleted != len(node_ids):
+        raise RuntimeError(
+            f"TigerGraph isolated namespace cleanup removed {deleted}/{len(node_ids)} known vertices"
+        )
+    if counts("tigergraph", loader) != (0, 0):
+        raise RuntimeError("TigerGraph isolated namespace did not clear cleanly")
+    print("TigerGraph   isolated dataset vertices and edges cleared", flush=True)
+
+
+def clear_for_ingest_measurement(platform: str, loader: Any) -> None:
+    """Allow fresh timing only for the two platforms missing genuine ingest data."""
+    if platform == "cognodb":
+        clear_cognodb_isolated_namespace(loader)
+    elif platform == "tigergraph":
+        clear_tigergraph_isolated_namespace(loader)
+    else:
+        raise ValueError(f"Fresh ingest measurement is not needed for {platform}")
 
 
 def ensure_loaded(
@@ -546,17 +625,90 @@ def benchmark(
 
 
 def load_previous_results() -> dict[str, Any]:
-    """Reuse completed measurements when a resumable run only adds TigerGraph."""
-    path = ROOT / "results" / "latest.json"
-    if not path.exists():
-        return {}
+    """Reuse the newest successful result for each platform after a partial run."""
+    merged: dict[str, Any] = {"platforms": {}}
+    paths = sorted(
+        (ROOT / "results").glob("*.json"),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    for path in paths:
+        try:
+            candidate = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(candidate, dict):
+            continue
+        for platform, result in candidate.get("platforms", {}).items():
+            if (
+                platform not in merged["platforms"]
+                and isinstance(result, dict)
+                and result.get("status") == "ok"
+            ):
+                merged["platforms"][platform] = result
+    return merged
+
+
+def load_saved_ingest_measurement(platform: str) -> dict[str, Any] | None:
+    """Load an externally timed, verified ingestion measurement when present."""
+    path = ROOT / "results" / f"{platform}_ingest_measurement.json"
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        measurement = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return {}
+        return None
+    if measurement.get("platform") != platform:
+        return None
+    ingest = measurement.get("ingest")
+    return ingest if isinstance(ingest, dict) else None
+
+
+def normalize_platform_result(platform_result: dict[str, Any]) -> dict[str, Any]:
+    """Attach Section 5.2 metadata without changing recorded measurements."""
+    normalized = dict(platform_result)
+    ingest = dict(normalized.get("ingest", {}))
+    node_seconds = ingest.get("nodes", {}).get("wall_clock_seconds")
+    edge_seconds = ingest.get("edges", {}).get("wall_clock_seconds")
+    if (
+        "total_wall_clock_seconds" not in ingest
+        and isinstance(node_seconds, (int, float))
+        and isinstance(edge_seconds, (int, float))
+    ):
+        # Historical records timed node and edge loading independently.  Their
+        # measured sum is the total load time for that saved run.
+        ingest["total_wall_clock_seconds"] = node_seconds + edge_seconds
+    normalized["ingest"] = ingest
+    normalized.setdefault("indexed_property", "user_id_original")
+    normalized.setdefault(
+        "mixed_workload",
+        {
+            "read_write_ratio": MIXED_READ_WRITE_RATIO,
+            "read_percent": int(MIXED_READ_WRITE_RATIO * 100),
+            "write_percent": round((1 - MIXED_READ_WRITE_RATIO) * 100),
+            "concurrency_levels": list(CONCURRENCY_LEVELS),
+        },
+    )
+    normalized.setdefault("resource_usage", "not observable from the configured client")
+    return normalized
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--remeasure-ingest",
+        action="store_true",
+        help=(
+            "clear and reload only the isolated CognoDB and TigerGraph benchmark "
+            "data to collect missing genuine ingestion measurements"
+        ),
+    )
+    parser.add_argument(
+        "--remeasure-ingest-platforms",
+        nargs="+",
+        choices=("cognodb", "tigergraph"),
+        metavar="PLATFORM",
+        help="freshly measure ingestion only for the named isolated platform(s)",
+    )
+    args = parser.parse_args()
     # The benchmark's local .env is authoritative; inherited shell variables
     # must not redirect TigerGraph to a different existing graph.
     load_dotenv(ROOT / ".env", override=True)
@@ -566,9 +718,20 @@ def main() -> None:
     print("Reduced shared dataset: 814 nodes, 1,000 relationships")
     loaders = preflight()
     try:
+        ingest_remeasure_platforms = (
+            tuple(args.remeasure_ingest_platforms)
+            if args.remeasure_ingest_platforms
+            else ("cognodb", "tigergraph")
+            if args.remeasure_ingest
+            else ()
+        )
+        if ingest_remeasure_platforms:
+            for platform in ingest_remeasure_platforms:
+                print(f"{PLATFORMS[platform][0]:<12} remeasuring isolated ingestion", flush=True)
+                clear_for_ingest_measurement(platform, loaders[platform])
         ingest, load_failures = ensure_loaded(loaders, 814, 1000)
         previous_results = load_previous_results()
-        results: dict[str, Any] = {"started_at_utc": datetime.now(UTC).isoformat(), "config": {"dataset_nodes": 814, "dataset_edges": 1000, "excluded_platforms": {"aura": "intermittent DatabaseNotFound availability", "puppygraph": "incompatible Bolt handshake"}, "namespace": {"node_label": NODE_LABEL, "run_label": RUN_LABEL, "relationship_type": REL_TYPE, "falkordb_graph": FALKOR_GRAPH, "arango_graph": ARANGO_GRAPH, "arango_vertex_collection": ARANGO_USERS, "arango_edge_collection": ARANGO_EDGES, "tigergraph_graph": os.getenv("TG_GRAPHNAME"), "tigergraph_vertex_type": TIGERGRAPH_VERTEX, "tigergraph_edge_type": TIGERGRAPH_EDGE}, "iterations": READ_ITERATIONS, "warmup": WARMUP, "mixed_duration_seconds": MIXED_DURATION_SECONDS, "mixed_concurrency_levels": list(CONCURRENCY_LEVELS), "reduced_benchmark_reason": "CognoDB c0 sustained larger ingestion stalled/timed out; isolated tests completed up to 1,000 relationships."}, "platforms": {}}
+        results: dict[str, Any] = {"started_at_utc": datetime.now(UTC).isoformat(), "config": {"dataset_nodes": 814, "dataset_edges": 1000, "excluded_platforms": {"aura": "intermittent DatabaseNotFound availability", "puppygraph": "incompatible Bolt handshake"}, "namespace": {"node_label": NODE_LABEL, "run_label": RUN_LABEL, "relationship_type": REL_TYPE, "falkordb_graph": FALKOR_GRAPH, "arango_graph": ARANGO_GRAPH, "arango_vertex_collection": ARANGO_USERS, "arango_edge_collection": ARANGO_EDGES, "tigergraph_graph": os.getenv("TG_GRAPHNAME"), "tigergraph_vertex_type": TIGERGRAPH_VERTEX, "tigergraph_edge_type": TIGERGRAPH_EDGE}, "iterations": READ_ITERATIONS, "warmup": WARMUP, "mixed_duration_seconds": MIXED_DURATION_SECONDS, "mixed_concurrency_levels": list(CONCURRENCY_LEVELS), "mixed_read_write_ratio": MIXED_READ_WRITE_RATIO, "indexed_property": "user_id_original", "reduced_benchmark_reason": "CognoDB c0 sustained larger ingestion stalled/timed out; isolated tests completed up to 1,000 relationships."}, "platforms": {}}
         dense_ids = [int(row["id"]) for row in node_rows[:200]]
         original_ids = [int(row["user_id_original"]) for row in node_rows[:200]]
         for platform, (name, _loader_cls) in PLATFORMS.items():
@@ -579,13 +742,20 @@ def main() -> None:
                 }
                 continue
             previous_platform = previous_results.get("platforms", {}).get(platform, {})
-            if (
-                platform != "tigergraph"
-                and ingest.get(platform, {}).get("skipped")
-                and previous_platform.get("status") == "ok"
-            ):
-                results["platforms"][platform] = previous_platform
-                print(f"{name:<12} BENCHMARK REUSED")
+            if previous_platform.get("status") == "ok":
+                reused = normalize_platform_result(previous_platform)
+                saved_ingest = load_saved_ingest_measurement(platform)
+                if ingest.get(platform, {}).get("skipped") and saved_ingest:
+                    reused["ingest"] = saved_ingest
+                    print(f"{name:<12} BENCHMARK REUSED (verified ingestion measurement recorded)")
+                    results["platforms"][platform] = normalize_platform_result(reused)
+                    continue
+                if not ingest.get(platform, {}).get("skipped"):
+                    reused["ingest"] = ingest[platform]
+                    print(f"{name:<12} BENCHMARK REUSED (ingestion remeasured)")
+                else:
+                    print(f"{name:<12} BENCHMARK REUSED")
+                results["platforms"][platform] = reused
                 continue
             try:
                 runtime = bolt_runtime(loaders[platform]) if platform in {"cognodb", "memgraph"} else falkor_runtime(loaders[platform]) if platform == "falkordb" else arango_runtime(loaders[platform]) if platform == "arango" else tigergraph_runtime(loaders[platform])
@@ -595,7 +765,7 @@ def main() -> None:
                     original_ids,
                     tigergraph_loader=loaders[platform] if platform == "tigergraph" else None,
                 )
-                results["platforms"][platform] = {"status": "ok", "ingest": ingest[platform], "workloads": workloads, "mixed_concurrent": mixed, "resource_usage": "not observable from the configured client"}
+                results["platforms"][platform] = normalize_platform_result({"status": "ok", "ingest": ingest[platform], "workloads": workloads, "mixed_concurrent": mixed, "resource_usage": "not observable from the configured client"})
                 print(f"{name:<12} BENCHMARK OK")
             except Exception as error:
                 results["platforms"][platform] = {"status": "failed", "ingest": ingest[platform], "error": f"{type(error).__name__}: {error}"}
