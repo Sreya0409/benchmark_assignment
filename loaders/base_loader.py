@@ -15,6 +15,8 @@ class GraphLoader(ABC):
     """Base contract for loading graph benchmark data into a database."""
 
     BATCH_SIZE = 1_000
+    NODE_BATCH_SIZE = BATCH_SIZE
+    EDGE_BATCH_SIZE = BATCH_SIZE
 
     def __init__(self, config: dict) -> None:
         """Initialize a loader and resolve platform connection env vars."""
@@ -71,6 +73,7 @@ class GraphLoader(ABC):
             insert_batch=self._insert_node_batch,
             count_key="nodes_loaded",
             rate_key="nodes_per_second",
+            batch_size=self.NODE_BATCH_SIZE,
         )
 
     def load_edges(self, edges_csv_path) -> dict[str, float | int]:
@@ -80,6 +83,7 @@ class GraphLoader(ABC):
             insert_batch=self._insert_edge_batch,
             count_key="rels_loaded",
             rate_key="rels_per_second",
+            batch_size=self.EDGE_BATCH_SIZE,
         )
 
     def _load_csv(
@@ -88,12 +92,13 @@ class GraphLoader(ABC):
         insert_batch: Callable[[list[dict[str, str]]], None],
         count_key: str,
         rate_key: str,
+        batch_size: int,
     ) -> dict[str, float | int]:
         path = Path(csv_path)
         loaded_count = 0
         started_at = time.perf_counter()
 
-        for batch in self._iter_csv_batches(path):
+        for batch in self._iter_csv_batches(path, batch_size):
             insert_batch(batch)
             loaded_count += len(batch)
 
@@ -108,14 +113,18 @@ class GraphLoader(ABC):
             rate_key: rows_per_second,
         }
 
-    def _iter_csv_batches(self, csv_path: Path) -> Iterator[list[dict[str, str]]]:
+    def _iter_csv_batches(
+        self,
+        csv_path: Path,
+        batch_size: int,
+    ) -> Iterator[list[dict[str, str]]]:
         with csv_path.open(newline="", encoding="utf-8") as csv_file:
             reader = csv.DictReader(csv_file)
             batch: list[dict[str, str]] = []
 
             for row in reader:
                 batch.append(row)
-                if len(batch) == self.BATCH_SIZE:
+                if len(batch) == batch_size:
                     yield batch
                     batch = []
 

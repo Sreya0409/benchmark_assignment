@@ -48,6 +48,12 @@ PLATFORMS = {
 }
 
 
+def csv_row_count(path: Path) -> int:
+    """Return the number of data rows in a CSV file."""
+    with path.open(newline="", encoding="utf-8") as input_file:
+        return sum(1 for _ in csv.DictReader(input_file))
+
+
 def parse_args() -> argparse.Namespace:
     """Parse runner CLI arguments."""
     parser = argparse.ArgumentParser(description="Run the graph database benchmark.")
@@ -74,6 +80,8 @@ def main() -> None:
     load_dotenv(PROJECT_ROOT / ".env")
 
     selected_platforms = parse_platforms(args.platforms)
+    dataset_nodes = csv_row_count(NODES_CSV)
+    dataset_edges = csv_row_count(EDGES_CSV)
     start_nodes = load_or_create_start_nodes(NODES_CSV, START_NODES_JSON)
     dense_ids = [node["id"] for node in start_nodes]
     original_ids = [node["user_id_original"] for node in start_nodes]
@@ -87,6 +95,8 @@ def main() -> None:
             "mixed_concurrency_levels": MIXED_CONCURRENCY_LEVELS,
             "skip_load": args.skip_load,
             "start_nodes_path": str(START_NODES_JSON.relative_to(PROJECT_ROOT)),
+            "dataset_nodes": dataset_nodes,
+            "dataset_edges": dataset_edges,
         },
         "platforms": {},
     }

@@ -32,6 +32,21 @@ def load_latest_results() -> dict[str, Any]:
 def render_readme(results: dict[str, Any]) -> str:
     """Render the README markdown document."""
     platforms = list(results.get("platforms", {}).keys())
+    dataset_nodes = nested_get(results, "config", "dataset_nodes")
+    dataset_edges = nested_get(results, "config", "dataset_edges")
+    dataset_description = (
+        f"SNAP soc-Pokec relationships; deterministic shared sample of "
+        f"{dataset_nodes:,} nodes and {dataset_edges:,} relationships."
+        if isinstance(dataset_nodes, int) and isinstance(dataset_edges, int)
+        else "SNAP soc-Pokec relationships; see the current CSV files for exact size."
+    )
+    reduced_note = (
+        " This approved reduced benchmark uses 1,000 relationships because "
+        "CognoDB could not reliably complete sustained ingestion beyond the "
+        "smaller validated dataset."
+        if dataset_edges == 1000
+        else ""
+    )
     lines = [
         "# Graph DB Benchmark",
         "",
@@ -71,7 +86,13 @@ def render_readme(results: dict[str, Any]) -> str:
         "",
         "## Methodology",
         "",
-        "- Dataset: SNAP soc-Pokec relationships sampled to roughly 200,000 relationships.",
+        f"- Dataset: {dataset_description}{reduced_note}",
+        *(
+            [f"- Result assembly: {nested_get(results, 'config', 'assembly_note')}"]
+            if nested_get(results, "config", "assembly_note")
+            else []
+        ),
+        "- Excluded platforms: Aura was excluded from this reduced run because of intermittent `DatabaseNotFound` availability; PuppyGraph was excluded because its endpoint could not complete a Bolt handshake.",
         "- Sampling: BFS-connected subgraph from a reproducible random seed.",
         "- Read iterations: "
         f"{nested_get(results, 'config', 'iterations') or '[FILL IN: read iterations]'} "
@@ -95,8 +116,8 @@ def render_readme(results: dict[str, Any]) -> str:
         "pip install -r requirements.txt",
         "cp .env.example .env",
         "# Fill in .env with cloud connection details.",
-        "python data/prepare_dataset.py --target-edges 200000 --seed 42",
-        "bash scripts/run_all.sh",
+        "python data/prepare_dataset.py --target-edges 1000 --seed 42",
+        "python scripts/run_isolated_1k_benchmark.py",
         "python -m harness.generate_readme",
         "```",
         "",
